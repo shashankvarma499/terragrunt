@@ -473,6 +473,7 @@ type WalkDirParallelOption func(*walkDirParallelConfig)
 
 type walkDirParallelConfig struct {
 	followSymlinks bool
+	workers        int
 }
 
 // WithFollowSymlinks makes [WalkDirParallel] descend into directories
@@ -486,6 +487,15 @@ type walkDirParallelConfig struct {
 func WithFollowSymlinks() WalkDirParallelOption {
 	return func(c *walkDirParallelConfig) {
 		c.followSymlinks = true
+	}
+}
+
+// WithWorkers sets how many directories [WalkDirParallel] reads at once.
+// A value of zero or less keeps fastwalk's per-platform default, which
+// grows with the CPU count.
+func WithWorkers(n int) WalkDirParallelOption {
+	return func(c *walkDirParallelConfig) {
+		c.workers = n
 	}
 }
 
@@ -508,12 +518,11 @@ func WalkDirParallel(fsys FS, root string, fn fs.WalkDirFunc, opts ...WalkDirPar
 		opt(&cfg)
 	}
 
-	var fwCfg *fastwalk.Config
-	if cfg.followSymlinks {
-		fwCfg = &fastwalk.Config{Follow: true}
-	}
+	fwCfg := fastwalk.DefaultConfig
+	fwCfg.Follow = cfg.followSymlinks
+	fwCfg.NumWorkers = cfg.workers
 
-	err := fastwalk.Walk(fwCfg, root, fn)
+	err := fastwalk.Walk(&fwCfg, root, fn)
 
 	if errors.Is(err, filepath.SkipDir) || errors.Is(err, filepath.SkipAll) {
 		return nil

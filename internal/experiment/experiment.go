@@ -115,6 +115,9 @@ const (
 	// portal instead of local HCL. Nothing is gated on it yet; the login
 	// command and the portal-defined catalog land in follow-up PRs.
 	TGLogin = "tg-login"
+	// MCPCommand gates the `terragrunt mcp` command, which serves Terragrunt
+	// operations to AI agents over the Model Context Protocol.
+	MCPCommand = "mcp-command"
 )
 
 const (
@@ -235,6 +238,9 @@ func NewExperiments() Experiments {
 		},
 		{
 			Name: TGLogin,
+		},
+		{
+			Name: MCPCommand,
 		},
 	}
 }

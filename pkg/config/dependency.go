@@ -410,7 +410,10 @@ type sharedDependencyPath struct {
 // so two spellings of one directory count as the same path. A disabled dependency reads
 // nothing and so collides with nothing, and a config_path that is not yet a known string
 // is skipped.
-func duplicateDependencyConfigPath(configPath string, deps Dependencies) (sharedDependencyPath, bool) {
+func duplicateDependencyConfigPath(
+	configPath string,
+	deps Dependencies,
+) (sharedDependencyPath, bool) {
 	seen := make(map[string]string, len(deps))
 
 	for i := range deps {
@@ -459,7 +462,13 @@ func decodeAndRetrieveOutputs(
 		return nil, err
 	}
 
-	dependencies, err := decodeDependencyBlocksWithAutoIncludeOverrides(ctx, pctx, l, file, evalParsingContext)
+	dependencies, err := decodeDependencyBlocksWithAutoIncludeOverrides(
+		ctx,
+		pctx,
+		l,
+		file,
+		evalParsingContext,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1570,7 +1579,8 @@ func resolveOutputJSON(
 	// reference the dependency namespace.
 	partialTerragruntConfig, err := PartialParseConfigFile(
 		ctx,
-		pctx.WithDecodeList(DependencyBlock, TerraformExtraArgs, TerragruntVersionConstraints).WithDiagnosticsSuppressed(l),
+		pctx.WithDecodeList(DependencyBlock, TerraformExtraArgs, TerragruntVersionConstraints).
+			WithDiagnosticsSuppressed(l),
 		l,
 		targetConfig,
 		nil,
@@ -1680,7 +1690,7 @@ func resolveOutputJSON(
 	applyExtraArgsEnvVarsForOutput(pctx, partialTerragruntConfig.Terraform)
 
 	workspace := ""
-	if shouldFetchDependencyOutputFromState(pctx, remoteStateTGConfig.RemoteState) {
+	if ShouldFetchDependencyOutputFromState(pctx, remoteStateTGConfig.RemoteState) {
 		workspace, err = dependencyStateWorkspace(pctx, workingDir)
 		if err != nil {
 			l.Debugf("Could not determine dependency workspace for direct state retrieval: %v", err)
@@ -1765,8 +1775,13 @@ var directStateBackends = map[string]directStateBackend{
 	},
 }
 
-// shouldFetchDependencyOutputFromState reports whether a registered backend supports a direct state read.
-func shouldFetchDependencyOutputFromState(pctx *ParsingContext, remoteState *remotestate.RemoteState) bool {
+// ShouldFetchDependencyOutputFromState reports whether a registered backend supports a direct state read.
+// The set of backends and their per-configuration rules live in [directStateBackends], so callers outside
+// this package ask here rather than testing a backend name themselves.
+func ShouldFetchDependencyOutputFromState(
+	pctx *ParsingContext,
+	remoteState *remotestate.RemoteState,
+) bool {
 	if remoteState == nil ||
 		!pctx.Experiments.Evaluate(experiment.DependencyFetchOutputFromState) ||
 		pctx.NoDependencyFetchOutputFromState {
@@ -2169,7 +2184,8 @@ func getTerragruntOutputJSONFromRemoteState(
 	// To speed up dependencies processing it is possible to retrieve its output directly from the backend without init dependencies
 	// A non-empty workspace means the caller already found a supported backend, so
 	// the reader lookup below cannot miss.
-	if stateBackend, supported := directStateBackends[remoteState.BackendName]; supported && workspace != "" {
+	if stateBackend, supported := directStateBackends[remoteState.BackendName]; supported &&
+		workspace != "" {
 		jsonBytes, readErr := stateBackend.read(ctx, l, pctx, remoteState, workspace)
 		if readErr != nil {
 			return nil, readErr
@@ -2602,7 +2618,11 @@ func siblingAutoIncludeDepOverrides(
 		return nil, nil
 	}
 
-	autoFile, err := parseAutoIncludeFileCached(ctx, pctx, pctx.TrackInclude.AutoIncludeOverride.Path)
+	autoFile, err := parseAutoIncludeFileCached(
+		ctx,
+		pctx,
+		pctx.TrackInclude.AutoIncludeOverride.Path,
+	)
 	if err != nil {
 		return nil, err
 	}
