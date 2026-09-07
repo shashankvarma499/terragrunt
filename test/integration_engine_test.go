@@ -43,13 +43,14 @@ var (
 	)
 )
 
-//nolint:paralleltest // setupLocalEngine calls t.Setenv, which bars t.Parallel
 func TestEngineLocalPlan(t *testing.T) {
+	t.Parallel()
+
 	rootPath := setupLocalEngine(t)
 
 	stdout, stderr, err := helpers.RunTerragruntCommandWithOutput(
 		t,
-		"terragrunt run --log-level debug --non-interactive --tf-forward-stdout --working-dir "+
+		"terragrunt run --experiment iac-engine --log-level debug --non-interactive --tf-forward-stdout --working-dir "+
 			rootPath+" -- plan",
 	)
 	require.NoError(t, err)
@@ -61,13 +62,14 @@ func TestEngineLocalPlan(t *testing.T) {
 	assert.Contains(t, stdout, "1 to add, 0 to change, 0 to destroy.")
 }
 
-//nolint:paralleltest // setupLocalEngine calls t.Setenv, which bars t.Parallel
 func TestEngineLocalApply(t *testing.T) {
+	t.Parallel()
+
 	rootPath := setupLocalEngine(t)
 
 	stdout, stderr, err := helpers.RunTerragruntCommandWithOutput(
 		t,
-		"terragrunt run --non-interactive --log-level debug --tf-forward-stdout --working-dir "+
+		"terragrunt run --experiment iac-engine --non-interactive --log-level debug --tf-forward-stdout --working-dir "+
 			rootPath+" -- apply -auto-approve",
 	)
 	require.NoError(t, err)
@@ -419,9 +421,9 @@ func TestEngineDisabledByNoEngineFlag(t *testing.T) {
 	assert.Contains(t, stdout, "1 to add, 0 to change, 0 to destroy.")
 }
 
-//nolint:paralleltest // the engine tests each clean the fixture directory they share
 func TestEngineDisabledByNoEngineFlagWithExperiment(t *testing.T) {
-	helpers.CleanupTerraformFolder(t, testFixtureOpenTofuEngine)
+	t.Parallel()
+
 	tmpEnvPath := helpers.CopyEnvironment(t, testFixtureOpenTofuEngine)
 	rootPath := filepath.Join(tmpEnvPath, testFixtureOpenTofuEngine)
 
@@ -499,9 +501,6 @@ func setupEngineCache(t *testing.T) (string, string) {
 func setupLocalEngine(t *testing.T) string {
 	t.Helper()
 
-	t.Setenv(envVarExperimental, "1")
-
-	helpers.CleanupTerraformFolder(t, testFixtureLocalEngine)
 	tmpEnvPath := helpers.CopyEnvironment(t, testFixtureLocalEngine)
 	rootPath := filepath.Join(tmpEnvPath, testFixtureLocalEngine)
 
