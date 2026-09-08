@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/go-version"
+	semver "github.com/gruntwork-io/terragrunt/internal/semver"
 
 	"github.com/gruntwork-io/terragrunt/internal/cache"
 	"github.com/gruntwork-io/terragrunt/internal/venv"
@@ -276,12 +276,12 @@ func LastReleaseTag(tags []string) string {
 }
 
 // extractSemVerTags - extract semver tags from passed tags slice.
-func extractSemVerTags(tags []string) []*version.Version {
-	var semverTags []*version.Version
+func extractSemVerTags(tags []string) []*semver.Version {
+	var semverTags []*semver.Version
 
 	for _, tag := range tags {
 		t := strings.TrimPrefix(tag, refsTags)
-		if v, err := version.NewVersion(t); err == nil {
+		if v, err := semver.Parse(t); err == nil {
 			// consider only semver tags
 			semverTags = append(semverTags, v)
 		}

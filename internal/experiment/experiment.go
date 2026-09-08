@@ -115,6 +115,9 @@ const (
 	// portal instead of local HCL. Nothing is gated on it yet; the login
 	// command and the portal-defined catalog land in follow-up PRs.
 	TGLogin = "tg-login"
+	// OfflineCAS gates the CAS flags that control the persisted probe cache:
+	// --cas-offline, --cas-refresh, and --cas-probe-ttl.
+	OfflineCAS = "offline-cas"
 )
 
 const (
@@ -235,6 +238,9 @@ func NewExperiments() Experiments {
 		},
 		{
 			Name: TGLogin,
+		},
+		{
+			Name: OfflineCAS,
 		},
 	}
 }
