@@ -726,12 +726,16 @@ func (fsys *osFS) LockContext(ctx context.Context, name string) (Unlocker, error
 // memMapFS wraps afero.MemMapFs with in-memory symlink support.
 type memMapFS struct {
 	afero.Fs
-	symlinks map[string]string
-	locks    map[string]*memLock
-	locksMu  sync.Mutex
+	symlinks   map[string]string
+	locks      map[string]*memLock
+	locksMu    sync.Mutex
+	symlinksMu sync.Mutex
 }
 
 func (fsys *memMapFS) SymlinkIfPossible(oldname, newname string) error {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
 	if _, exists := fsys.symlinks[newname]; exists {
 		return &os.LinkError{Op: "symlink", Old: oldname, New: newname, Err: os.ErrExist}
 	}
@@ -760,6 +764,9 @@ func (fsys *memMapFS) LinkIfPossible(oldname, newname string) error {
 }
 
 func (fsys *memMapFS) ReadlinkIfPossible(name string) (string, error) {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
 	target, ok := fsys.symlinks[name]
 	if !ok {
 		return "", &os.PathError{Op: "readlink", Path: name, Err: os.ErrInvalid}
@@ -769,6 +776,9 @@ func (fsys *memMapFS) ReadlinkIfPossible(name string) (string, error) {
 }
 
 func (fsys *memMapFS) LstatIfPossible(name string) (os.FileInfo, bool, error) {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
 	if _, ok := fsys.symlinks[name]; ok {
 		return symlinkFileInfo{name: filepath.Base(name)}, true, nil
 	}
@@ -782,6 +792,9 @@ func (fsys *memMapFS) LstatIfPossible(name string) (os.FileInfo, bool, error) {
 // that the embedded afero.MemMapFs does not see, so they are handled here
 // before delegating to the underlying filesystem.
 func (fsys *memMapFS) Remove(name string) error {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
 	if _, ok := fsys.symlinks[name]; ok {
 		delete(fsys.symlinks, name)
 		return nil
@@ -794,12 +807,44 @@ func (fsys *memMapFS) Remove(name string) error {
 // side table that the embedded afero.MemMapFs does not see, so they are
 // handled here before delegating to the underlying filesystem.
 func (fsys *memMapFS) RemoveAll(path string) error {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
 	if _, ok := fsys.symlinks[path]; ok {
 		delete(fsys.symlinks, path)
 		return nil
 	}
 
 	return fsys.Fs.RemoveAll(path)
+}
+
+// Rename moves the file or symlink at oldname to newname, replacing whatever
+// newname holds. Symlinks live in a side table that the embedded
+// afero.MemMapFs does not see, so a link is moved here, and a link newname
+// already holds is dropped, before delegating to the underlying filesystem.
+func (fsys *memMapFS) Rename(oldname, newname string) error {
+	fsys.symlinksMu.Lock()
+	defer fsys.symlinksMu.Unlock()
+
+	target, isLink := fsys.symlinks[oldname]
+	if !isLink {
+		if err := fsys.Fs.Rename(oldname, newname); err != nil {
+			return err
+		}
+
+		delete(fsys.symlinks, newname)
+
+		return nil
+	}
+
+	if err := fsys.Fs.Remove(newname); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	delete(fsys.symlinks, oldname)
+	fsys.symlinks[newname] = target
+
+	return nil
 }
 
 // symlinkFileInfo reports symlink metadata for links stored in memMapFS's side table.

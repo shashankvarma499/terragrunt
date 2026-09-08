@@ -8,6 +8,7 @@ package cas
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -26,11 +27,18 @@ import (
 // DefaultCASCloneDepth is the default shallow clone depth for CAS (git clone --depth).
 const DefaultCASCloneDepth = 1
 
+// gitScheme is the [SourceRequest.Scheme] the git ingest path travels under.
+const gitScheme = "git"
+
 // Option configures the behavior of CAS.
 type Option func(*CAS)
 
 // CloneOptions configures the behavior of a specific clone operation.
 type CloneOptions struct {
+	// LinkMode overrides the mode the CAS instance materializes trees in
+	// for this clone alone. Nil leaves the instance's own mode in place.
+	LinkMode *LinkMode
+
 	// Dir specifies the target directory for the clone.
 	// If empty, uses the repository name.
 	Dir string
@@ -39,8 +47,12 @@ type CloneOptions struct {
 	// If empty, uses HEAD.
 	Branch string
 
-	// IncludedGitFiles specifies the files to preserve from the .git directory.
-	// If empty, does not preserve any files.
+	// IncludedGitFiles names files from the source repository's git
+	// directory to write under .git in the target directory. If empty,
+	// no .git directory is written. The stored tree never carries these
+	// entries; each is recorded separately against the commit so callers
+	// asking for different lists share one tree and each receive only the
+	// files they named.
 	IncludedGitFiles []string
 
 	// Depth limits the clone history to the given number of commits passed to git clone --depth.
@@ -92,14 +104,23 @@ func WithMutable(mutable bool) CloneOption {
 	return func(o *CloneOptions) { o.Mutable = mutable }
 }
 
+// WithCloneLinkMode materializes this clone in mode rather than in the mode
+// the CAS instance carries. It serves a caller whose target directory has to
+// hold files of a particular shape, such as one CAS itself reads back.
+func WithCloneLinkMode(mode LinkMode) CloneOption {
+	return func(o *CloneOptions) { o.LinkMode = &mode }
+}
+
 // CAS clones a git repository using content-addressable storage.
 type CAS struct {
-	blobStore  *Store
-	treeStore  *Store
-	synthStore *Store
-	gitStore   *GitStore
-	storePath  string
-	cloneDepth int
+	blobStore    *Store
+	treeStore    *Store
+	synthStore   *Store
+	gitFileStore *Store
+	gitStore     *GitStore
+	storePath    string
+	cloneDepth   int
+	linkMode     LinkMode
 }
 
 // WithStorePath specifies a custom path for the content store.
@@ -121,9 +142,17 @@ func WithCloneDepth(depth int) Option {
 	}
 }
 
+// WithLinkMode sets how materialized trees reach their target directories.
+// Without it, CAS uses [DefaultLinkMode].
+func WithLinkMode(mode LinkMode) Option {
+	return func(c *CAS) {
+		c.linkMode = mode
+	}
+}
+
 // New creates a new CAS instance with the given options.
 func New(v *venv.Venv, opts ...Option) (*CAS, error) {
-	c := &CAS{}
+	c := &CAS{linkMode: DefaultLinkMode}
 
 	for _, opt := range opts {
 		opt(c)
@@ -141,6 +170,7 @@ func New(v *venv.Venv, opts ...Option) (*CAS, error) {
 	c.blobStore = NewStore(filepath.Join(c.storePath, "blobs"))
 	c.treeStore = NewStore(filepath.Join(c.storePath, "trees"))
 	c.synthStore = NewStore(filepath.Join(c.storePath, "synth", "trees"))
+	c.gitFileStore = NewStore(filepath.Join(c.storePath, "gitfiles"))
 	c.gitStore = NewGitStore(filepath.Join(c.storePath, "git"))
 
 	return c, nil
@@ -155,8 +185,24 @@ func (c *CAS) TreeStore() *Store { return c.treeStore }
 // SynthStore returns the store for synthetic tree content.
 func (c *CAS) SynthStore() *Store { return c.synthStore }
 
+// GitFileStore returns the store holding one record per (commit, git
+// file name) pair for the files [CloneOptions.IncludedGitFiles] can
+// name. Each record is a single tree line pointing at the file's blob;
+// [GitFileKey] derives the record key.
+func (c *CAS) GitFileStore() *Store { return c.gitFileStore }
+
 // StorePath returns the root directory containing every CAS store.
 func (c *CAS) StorePath() string { return c.storePath }
+
+// LinkMode returns the mode this instance materializes trees in.
+func (c *CAS) LinkMode() LinkMode { return c.linkMode }
+
+// linkTreeOptions returns the options every tree this instance materializes
+// is linked with: its own mode, plus the caller's own options, which come
+// last so a caller that names a mode overrides the instance's.
+func (c *CAS) linkTreeOptions(opts []LinkTreeOption) []LinkTreeOption {
+	return append([]LinkTreeOption{WithTreeLinkMode(c.linkMode)}, opts...)
+}
 
 // ensureStorePaths creates the store directory hierarchy on v.FS. Callers
 // invoke this from any top-level entry point that may write to a store, so
@@ -170,7 +216,7 @@ func (c *CAS) ensureStorePaths(v *venv.Venv) error {
 		return fmt.Errorf("create CAS store path: %w", err)
 	}
 
-	for _, s := range []*Store{c.blobStore, c.treeStore, c.synthStore} {
+	for _, s := range []*Store{c.blobStore, c.treeStore, c.synthStore, c.gitFileStore} {
 		if err := v.FS.MkdirAll(s.Path(), DefaultDirPerms); err != nil {
 			return fmt.Errorf("create CAS store subdirectory %s: %w", s.Path(), err)
 		}
@@ -197,7 +243,7 @@ type GitResolver struct {
 }
 
 // Scheme returns "git".
-func (r *GitResolver) Scheme() string { return "git" }
+func (r *GitResolver) Scheme() string { return gitScheme }
 
 // Probe returns the commit SHA for r.Branch (HEAD when empty). The
 // returned SHA is the cache key verbatim and doubles as the git
@@ -265,7 +311,7 @@ func (c *CAS) Clone(
 	clonedOpts.Dir = c.prepareTargetDirectory(opts.Dir, url)
 
 	return c.FetchSource(ctx, l, v, &clonedOpts, SourceRequest{
-		Scheme:   "git",
+		Scheme:   gitScheme,
 		URL:      url,
 		Resolver: &GitResolver{Venv: v, Store: c.gitStore, Branch: opts.Branch},
 		Fetch:    c.gitFetcher(url, &opts),
@@ -303,7 +349,7 @@ func (c *CAS) populateTreeFromRef(
 ) (string, error) {
 	switch ref := ref.(type) {
 	case *symbolicRef:
-		if !c.treeStore.NeedsWrite(v, ref.Hash) {
+		if !c.needsIngest(v, ref.Hash, opts) {
 			return ref.Hash, nil
 		}
 
@@ -314,7 +360,7 @@ func (c *CAS) populateTreeFromRef(
 		return ref.Hash, nil
 
 	case *commitRef:
-		if ref.Hash != "" && !c.treeStore.NeedsWrite(v, ref.Hash) {
+		if ref.Hash != "" && !c.needsIngest(v, ref.Hash, opts) {
 			return ref.Hash, nil
 		}
 
@@ -376,9 +422,9 @@ func (c *CAS) populateTreeFromSymbolicRef(
 }
 
 // populateTreeFromCommitRef resolves ref via [GitStore.EnsureCommit]
-// (full-depth fetch on a cache miss) and stores its tree in the CAS.
-// Returns the canonical commit hash. Falls back to a temporary bare
-// clone if the central [GitStore] is unavailable.
+// (a cache miss fetches through [fetchPinnedCommit]) and stores its tree
+// in the CAS. Returns the canonical commit hash. Falls back to a
+// temporary bare clone if the central [GitStore] is unavailable.
 func (c *CAS) populateTreeFromCommitRef(
 	ctx context.Context,
 	l log.Logger,
@@ -395,7 +441,7 @@ func (c *CAS) populateTreeFromCommitRef(
 	if err == nil {
 		defer repo.Release(l)
 
-		if !c.treeStore.NeedsWrite(v, repo.Hash) {
+		if !c.needsIngest(v, repo.Hash, opts) {
 			return repo.Hash, nil
 		}
 
@@ -445,7 +491,7 @@ func (c *CAS) populateTreeFromCommitRef(
 		return "", err
 	}
 
-	if !c.treeStore.NeedsWrite(v, canonicalHash) {
+	if !c.needsIngest(v, canonicalHash, opts) {
 		return canonicalHash, nil
 	}
 
@@ -520,8 +566,8 @@ type symbolicRef struct {
 func (r *symbolicRef) CommitHash() string { return r.Hash }
 
 // commitRef carries a ref ls-remote did not canonicalize. The central git
-// store resolves it later via rev-parse and a full-history fetch on a
-// cache miss.
+// store resolves it later via rev-parse, fetching through
+// [fetchPinnedCommit] on a cache miss.
 type commitRef struct {
 	// URL is the remote repository URL.
 	URL string
@@ -587,8 +633,9 @@ func looksLikeFullSHA(s string) bool {
 
 // storeRootTreeFrom reads the recursive tree at hash from the supplied
 // runner's working repository and stores its tree and reachable blobs in
-// the CAS. The runner must already have its WorkDir pointed at a bare repo
-// (or worktree) that contains the requested object. url is the remote the
+// the CAS, then records each of opts.IncludedGitFiles against hash. The
+// runner must already have its WorkDir pointed at a bare repo (or
+// worktree) that contains the requested object. url is the remote the
 // repository came from; submodule ingestion resolves relative .gitmodules
 // URLs against it.
 func (c *CAS) storeRootTreeFrom(
@@ -608,48 +655,87 @@ func (c *CAS) storeRootTreeFrom(
 		return err
 	}
 
-	if len(opts.IncludedGitFiles) == 0 {
-		return nil
+	return c.storeIncludedGitFiles(l, v, runner.WorkDir, hash, opts.IncludedGitFiles)
+}
+
+// needsIngest reports whether the store lacks the tree at hash or a
+// record for any of opts.IncludedGitFiles against it. Checking the tree
+// alone would let an earlier ingest with a shorter list short-circuit a
+// later caller out of the .git files it asked for.
+func (c *CAS) needsIngest(v *venv.Venv, hash string, opts *CloneOptions) bool {
+	if c.treeStore.NeedsWrite(v, hash) {
+		return true
 	}
 
-	treeContent := NewContent(c.treeStore)
-
-	data, err := treeContent.Read(v, hash)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range opts.IncludedGitFiles {
-		stat, err := v.FS.Stat(filepath.Join(runner.WorkDir, file))
-		if err != nil {
-			return err
+	for _, name := range opts.IncludedGitFiles {
+		if c.gitFileStore.NeedsWrite(v, GitFileKey(hash, name)) {
+			return true
 		}
+	}
 
-		if stat.IsDir() {
+	return false
+}
+
+// storeIncludedGitFiles copies each named file from the git directory
+// at repoDir into the blob store and records it against hash. Names
+// already recorded are skipped, so a later caller with a longer list
+// only adds the files the earlier ingest did not cover. The record is
+// written after the blob so a record hit implies the blob is present.
+func (c *CAS) storeIncludedGitFiles(
+	l log.Logger,
+	v *venv.Venv,
+	repoDir, hash string,
+	names []string,
+) error {
+	blobContent := NewContent(c.blobStore)
+	recordContent := NewContent(c.gitFileStore)
+
+	for _, name := range names {
+		key := GitFileKey(hash, name)
+		if !c.gitFileStore.NeedsWrite(v, key) {
 			continue
 		}
 
-		workDirPath := filepath.Join(runner.WorkDir, file)
+		srcPath := filepath.Join(repoDir, name)
 
-		includedHash, err := hashFile(v.FS, workDirPath)
+		info, err := v.FS.Stat(srcPath)
 		if err != nil {
 			return err
 		}
 
-		blobContent := NewContent(c.blobStore)
+		if info.IsDir() {
+			return &WrappedError{Op: "store_git_file", Path: srcPath, Err: ErrIncludedGitFileIsDir}
+		}
 
-		if err := blobContent.EnsureCopy(l, v, includedHash, workDirPath); err != nil {
+		blobHash, err := hashFile(v.FS, srcPath)
+		if err != nil {
 			return err
 		}
 
-		path := filepath.Join(".git", file)
+		if err := blobContent.EnsureCopy(l, v, blobHash, srcPath); err != nil {
+			return err
+		}
 
-		data = append(
-			data,
-			fmt.Appendf(nil, "%06o blob %s\t%s\n", stat.Mode().Perm(), includedHash, path)...)
+		record := fmt.Appendf(nil, "%06o blob %s\t%s\n", info.Mode().Perm(), blobHash, name)
+
+		if err := recordContent.EnsureWithWait(l, v, key, record); err != nil {
+			return err
+		}
 	}
 
-	return treeContent.Store(l, v, hash, data)
+	return nil
+}
+
+// GitFileKey returns the [CAS.GitFileStore] key for the git directory
+// file name recorded against the commit at hash.
+func GitFileKey(hash, name string) string {
+	h := sha256.New()
+	h.Write([]byte("gitfile\x00"))
+	h.Write([]byte(hash))
+	h.Write([]byte{0})
+	h.Write([]byte(name))
+
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // storeTreeRecursive stores a tree fetched from git ls-tree -r. The tree
@@ -792,9 +878,9 @@ func submoduleURLs(
 // write bits cleared so the default-link path can hardlink the
 // blob directly without altering its executable-ness.
 //
-// err is a named return so the deferred unlock and tempfile cleanup
-// can errors.Join their failures into what the caller actually sees;
-// otherwise the assignments target a local variable that has no
+// err is a named return so the deferred tempfile cleanup can
+// errors.Join its failure into what the caller actually sees;
+// otherwise the assignment targets a local variable that has no
 // connection to the function's return slot.
 func (c *CAS) ensureBlob(
 	ctx context.Context,
@@ -805,20 +891,12 @@ func (c *CAS) ensureBlob(
 ) (err error) {
 	v.RequireGOOS()
 
-	needsWrite, lock, err := c.blobStore.EnsureWithWait(v, hash)
-	if err != nil {
-		return err
-	}
+	needsWrite, unlock := c.blobStore.EnsureWithWait(v, hash)
+	defer unlock()
 
 	if !needsWrite {
 		return nil
 	}
-
-	defer func() {
-		if unlockErr := lock.Unlock(); unlockErr != nil {
-			err = errors.Join(err, unlockErr)
-		}
-	}()
 
 	content := NewContent(c.blobStore)
 
@@ -850,10 +928,6 @@ func (c *CAS) ensureBlob(
 		return err
 	}
 
-	if err = v.FS.Rename(tmpPath, content.getPath(hash)); err != nil {
-		return err
-	}
-
 	// Symlink entries (git mode 120000) have no permission bits, but the blob
 	// stores the link target string and must stay readable so linkTree can
 	// resolve the symlink at materialization time.
@@ -862,11 +936,13 @@ func (c *CAS) ensureBlob(
 		storedPerm = StoredFilePerms
 	}
 
-	if err = v.FS.Chmod(content.getPath(hash), storedPerm); err != nil {
+	// The mode is set before the rename so a reader never sees the object
+	// at the temp file's mode between the two steps.
+	if err = v.FS.Chmod(tmpPath, storedPerm); err != nil {
 		return err
 	}
 
-	return nil
+	return content.publish(v, tmpPath, hash)
 }
 
 func hashFile(fsys vfs.FS, path string) (string, error) {

@@ -102,15 +102,20 @@ type GenerateConfig struct {
 type WriteOption func(*writeOpts)
 
 type writeOpts struct {
-	store *cas.Content
+	store    *cas.Content
+	linkOpts []cas.LinkOption
 }
 
 // WithContentStore deduplicates generated files that do not opt into
-// mutability: identical contents are written once into store and hard-linked
-// read-only into each working directory. Without it every generated file is
-// written directly and stays writable, and [GenerateConfig.Mutable] has no effect.
-func WithContentStore(store *cas.Content) WriteOption {
-	return func(o *writeOpts) { o.store = store }
+// mutability: identical contents are written once into store and materialized
+// into each working directory under linkOpts, which default to a read-only
+// hard link. Without it every generated file is written directly and stays
+// writable, and [GenerateConfig.Mutable] has no effect.
+func WithContentStore(store *cas.Content, linkOpts ...cas.LinkOption) WriteOption {
+	return func(o *writeOpts) {
+		o.store = store
+		o.linkOpts = linkOpts
+	}
 }
 
 // WriteToFile will generate a new file at the given target path with the given contents. If a file already exists at
@@ -212,7 +217,7 @@ func WriteToFile(
 		}
 	}
 
-	if err := materialize(ctx, l, v, targetPath, contentsToWrite, config.Mutable, o.store); err != nil {
+	if err := materialize(l, v, targetPath, contentsToWrite, config.Mutable, o.store, o.linkOpts); err != nil {
 		return err
 	}
 
@@ -224,13 +229,13 @@ func WriteToFile(
 // materialize puts contents at targetPath, sharing one stored copy across
 // working directories unless the block opts into mutability.
 func materialize(
-	ctx context.Context,
 	l log.Logger,
 	v *venv.Venv,
 	targetPath string,
 	contents []byte,
 	mutable *bool,
 	store *cas.Content,
+	linkOpts []cas.LinkOption,
 ) error {
 	if store == nil || (mutable != nil && *mutable) {
 		return vfs.WriteFile(v.FS, targetPath, contents, generatedFilePerms)
@@ -243,7 +248,11 @@ func materialize(
 		return err
 	}
 
-	return store.Link(ctx, v, hash, targetPath, generatedFilePerms)
+	if _, err := store.Link(v, hash, targetPath, generatedFilePerms, linkOpts...); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Whether or not file generation should continue if the file path already exists. The answer depends on the
