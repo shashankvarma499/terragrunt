@@ -24,7 +24,7 @@ func expandedUnit(name, key, path string) *config.Unit {
 		Name: name,
 		Path: path,
 		Expansion: &hclparse.ExpansionBlock{
-			InstanceKey: hclparse.InstanceKey{EachKey: new(key)},
+			EachKey: new(key),
 		},
 	}
 }
