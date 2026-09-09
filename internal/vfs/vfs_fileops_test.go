@@ -818,9 +818,7 @@ func TestMemMapFSSymlinkTableWithRacing(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for i := range workers {
-
 		wg.Go(func() {
-
 			link := fmt.Sprintf("/link%d", i)
 			assert.NoError(t, vfs.Symlink(fsys, "/target", link))
 
