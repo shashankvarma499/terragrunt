@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestCopyFile(t *testing.T) {
@@ -815,23 +816,37 @@ func TestMemMapFSSymlinkTableWithRacing(t *testing.T) {
 		require.NoError(t, vfs.WriteFile(fsys, fmt.Sprintf("/src%d", i), []byte("x"), 0o644))
 	}
 
-	var wg sync.WaitGroup
+	targets := make([]string, workers)
+
+	var g errgroup.Group
 
 	for i := range workers {
-		wg.Go(func() {
+		g.Go(func() error {
 			link := fmt.Sprintf("/link%d", i)
-			assert.NoError(t, vfs.Symlink(fsys, "/target", link))
+			if err := vfs.Symlink(fsys, "/target", link); err != nil {
+				return err
+			}
 
 			target, err := vfs.Readlink(fsys, link)
-			assert.NoError(t, err)
-			assert.Equal(t, "/target", target)
+			if err != nil {
+				return err
+			}
 
-			assert.NoError(t, fsys.Rename(fmt.Sprintf("/src%d", i), fmt.Sprintf("/dst%d", i)))
-			assert.NoError(t, fsys.Remove(link))
+			targets[i] = target
+
+			if err := fsys.Rename(fmt.Sprintf("/src%d", i), fmt.Sprintf("/dst%d", i)); err != nil {
+				return err
+			}
+
+			return fsys.Remove(link)
 		})
 	}
 
-	wg.Wait()
+	require.NoError(t, g.Wait())
+
+	for i := range workers {
+		assert.Equal(t, "/target", targets[i])
+	}
 
 	for i := range workers {
 		_, err := fsys.Stat(fmt.Sprintf("/dst%d", i))
