@@ -81,7 +81,7 @@ func TestLinkTreeEmitsOneSpanPerTree(t *testing.T) {
 	for i := range files {
 		hash := fmt.Sprintf("%040x", i+1)
 
-		require.NoError(t, content.Store(l, v, hash, fmt.Appendf(nil, "content %d\n", i)))
+		require.NoError(t, content.Store(l, v, hash, fmt.Appendf(nil, "content %d\n", i), cas.StoredFilePerms))
 
 		treeData = append(treeData, fmt.Appendf(nil, "100644 blob %s\tmain%d.tf\n", hash, i)...)
 	}
@@ -93,7 +93,7 @@ func TestLinkTreeEmitsOneSpanPerTree(t *testing.T) {
 
 	ctx := telemetry.ContextWithTelemeter(t.Context(), tlm)
 
-	require.NoError(t, cas.LinkTree(ctx, v, store, store, tree, "/target"))
+	require.NoError(t, cas.LinkTree(ctx, l, v, store, store, tree, "/target"))
 	require.NoError(t, tlm.Shutdown(ctx))
 
 	var treeSpans []decodedSpan
@@ -135,7 +135,7 @@ func TestLinkTreeReportsDegradedMode(t *testing.T) {
 	store := cas.NewStore("/store")
 	hash := fmt.Sprintf("%040x", 1)
 
-	require.NoError(t, cas.NewContent(store).Store(l, v, hash, blobData))
+	require.NoError(t, cas.NewContent(store).Store(l, v, hash, blobData, cas.StoredFilePerms))
 
 	tree, err := git.ParseTree(
 		fmt.Appendf(nil, "100644 blob %s\tmain.tf\n", hash),
@@ -150,7 +150,7 @@ func TestLinkTreeReportsDegradedMode(t *testing.T) {
 	ctx := telemetry.ContextWithTelemeter(t.Context(), tlm)
 
 	require.NoError(t, cas.LinkTree(
-		ctx, v, store, store, tree, "/target", cas.WithTreeLinkMode(cas.LinkModeHardlink),
+		ctx, l, v, store, store, tree, "/target", cas.WithTreeLinkMode(cas.LinkModeHardlink),
 	))
 	require.NoError(t, tlm.Shutdown(ctx))
 

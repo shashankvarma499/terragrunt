@@ -24,6 +24,11 @@ import (
 // unixPermMask isolates the user/group/other rwx bits from a git tree mode.
 const unixPermMask = os.FileMode(0o777)
 
+// defaultMaxTreeDepth stops a descent that the repository being materialized
+// would otherwise decide the length of, growing the stack and the worker count
+// together as every level opens an errgroup of its own.
+const defaultMaxTreeDepth = 64
+
 // Git stores the entry type in the high bits of a six-digit octal mode;
 // gitTypeMask isolates them so a symlink blob (120000) can be distinguished
 // from a regular blob (100644 / 100755) at materialization time.
@@ -65,6 +70,7 @@ var linkFallbackByMode = map[LinkMode]LinkFallback{
 type LinkTreeOption func(*linkTreeOpts)
 
 type linkTreeOpts struct {
+	maxDepth  int
 	mode      LinkMode
 	forceCopy bool
 }
@@ -85,6 +91,22 @@ func WithTreeLinkMode(mode LinkMode) LinkTreeOption {
 	return func(o *linkTreeOpts) { o.mode = mode }
 }
 
+// WithMaxTreeDepth sets how deep a tree is followed before materialization
+// gives up, in place of [defaultMaxTreeDepth].
+func WithMaxTreeDepth(depth int) LinkTreeOption {
+	return func(o *linkTreeOpts) { o.maxDepth = depth }
+}
+
+// maxTreeDepth returns the nesting bound to enforce, falling back to
+// [defaultMaxTreeDepth] when the caller leaves it unset.
+func (o *linkTreeOpts) maxTreeDepth() int {
+	if o.maxDepth > 0 {
+		return o.maxDepth
+	}
+
+	return defaultMaxTreeDepth
+}
+
 // LinkTree writes the tree to a target directory.
 // blobStore is used to resolve blob entries, treeStore is used to resolve subtree entries.
 //
@@ -93,6 +115,7 @@ func WithTreeLinkMode(mode LinkMode) LinkTreeOption {
 // of files stays one span rather than thousands.
 func LinkTree(
 	ctx context.Context,
+	l log.Logger,
 	v *venv.Venv,
 	blobStore *Store,
 	treeStore *Store,
@@ -111,6 +134,7 @@ func LinkTree(
 		blobStore: blobStore,
 		treeStore: treeStore,
 		rootDir:   targetDir,
+		maxDepth:  o.maxTreeDepth(),
 		mode:      mode,
 		forceCopy: o.forceCopy,
 	}
@@ -119,7 +143,7 @@ func LinkTree(
 		"path": targetDir,
 		"mode": mode.String(),
 	}, func(childCtx context.Context, _ log.Logger) error {
-		err := linker.link(childCtx, v, t, targetDir)
+		err := linker.link(childCtx, l, v, t, targetDir, 0)
 
 		linker.report(childCtx)
 
@@ -150,6 +174,7 @@ type treeLinker struct {
 	blobStore        *Store
 	treeStore        *Store
 	rootDir          string
+	maxDepth         int
 	linked           atomic.Int64
 	cloned           atomic.Int64
 	copied           atomic.Int64
@@ -166,10 +191,16 @@ type treeLinker struct {
 // subdirectory.
 func (tl *treeLinker) link(
 	ctx context.Context,
+	l log.Logger,
 	v *venv.Venv,
 	t *git.Tree,
 	targetDir string,
+	depth int,
 ) error {
+	if depth > tl.maxDepth {
+		return &TreeDepthExceededError{MaxDepth: tl.maxDepth, Path: targetDir}
+	}
+
 	blobContent := NewContent(tl.blobStore)
 	treeContent := NewContent(tl.treeStore)
 
@@ -229,7 +260,7 @@ func (tl *treeLinker) link(
 	}
 
 	if idx := tl.probeIndex(workItems); idx >= 0 {
-		if err := tl.linkBlob(v, blobContent, &workItems[idx]); err != nil {
+		if err := tl.linkBlob(l, v, blobContent, &workItems[idx]); err != nil {
 			return err
 		}
 
@@ -247,7 +278,7 @@ func (tl *treeLinker) link(
 		g.Go(func() error {
 			switch work.itemType {
 			case itemTypeBlob:
-				if err := tl.linkBlob(v, blobContent, &work); err != nil {
+				if err := tl.linkBlob(l, v, blobContent, &work); err != nil {
 					return err
 				}
 			case itemTypeSymlink:
@@ -282,7 +313,7 @@ func (tl *treeLinker) link(
 					return fmt.Errorf("parse tree %s: %w", work.entry.Hash, err)
 				}
 
-				if err := tl.link(ctx, v, subTree, work.path); err != nil {
+				if err := tl.link(ctx, l, v, subTree, work.path, depth+1); err != nil {
 					return fmt.Errorf("link subtree %s: %w", work.path, err)
 				}
 			case itemTypeSubmodule:
@@ -309,7 +340,7 @@ func (tl *treeLinker) link(
 					return fmt.Errorf("parse submodule tree %s: %w", work.entry.Hash, err)
 				}
 
-				if err := tl.link(ctx, v, subTree, work.path); err != nil {
+				if err := tl.link(ctx, l, v, subTree, work.path, depth+1); err != nil {
 					return fmt.Errorf("link submodule %s: %w", work.path, err)
 				}
 			}
@@ -357,8 +388,14 @@ func (tl *treeLinker) linkOptions() []LinkOption {
 }
 
 // linkBlob materializes one blob entry and counts how it arrived.
-func (tl *treeLinker) linkBlob(v *venv.Venv, blobContent *Content, work *workItem) error {
+func (tl *treeLinker) linkBlob(
+	l log.Logger,
+	v *venv.Venv,
+	blobContent *Content,
+	work *workItem,
+) error {
 	outcome, err := blobContent.Link(
+		l,
 		v,
 		work.entry.Hash,
 		work.path,

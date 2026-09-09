@@ -189,7 +189,7 @@ func benchmarkShapeLinkModes(
 
 				b.StartTimer()
 
-				require.NoError(b, cas.LinkTree(b.Context(), v, c.BlobStore(), c.TreeStore(),
+				require.NoError(b, cas.LinkTree(b.Context(), l, v, c.BlobStore(), c.TreeStore(),
 					tree, dir, opts...))
 			}
 

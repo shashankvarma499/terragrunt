@@ -493,7 +493,7 @@ func (c *CAS) buildSyntheticTree(
 			}
 
 			blobHash := hashAlg.Sum([]byte(target))
-			if err := blobContent.Ensure(l, v, blobHash, []byte(target)); err != nil {
+			if err := blobContent.Ensure(l, v, blobHash, []byte(target), StoredFilePerms); err != nil {
 				return fmt.Errorf("failed to store symlink blob %s: %w", path, err)
 			}
 
@@ -533,7 +533,7 @@ func (c *CAS) buildSyntheticTree(
 	treeHash := hashAlg.Sum([]byte(refHash + relPathInRepo))
 
 	synthContent := NewContent(c.synthStore)
-	if err := synthContent.Ensure(l, v, treeHash, treeData); err != nil {
+	if err := synthContent.Ensure(l, v, treeHash, treeData, StoredFilePerms); err != nil {
 		return "", fmt.Errorf("failed to store synthetic tree: %w", err)
 	}
 

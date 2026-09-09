@@ -124,7 +124,7 @@ func (c *CAS) FetchSource(
 			if suggestedKey != "" && !c.needsIngest(v, suggestedKey, opts) {
 				recordFetchOutcome(childCtx, true)
 
-				return c.linkStoredTree(childCtx, v, opts, src.Scheme, suggestedKey)
+				return c.linkStoredTree(childCtx, l, v, opts, src.Scheme, suggestedKey)
 			}
 
 			recordFetchOutcome(childCtx, false)
@@ -134,7 +134,7 @@ func (c *CAS) FetchSource(
 				return fmt.Errorf("fetch %s: %w", src.URL, err)
 			}
 
-			return c.linkStoredTree(childCtx, v, opts, src.Scheme, treeKey)
+			return c.linkStoredTree(childCtx, l, v, opts, src.Scheme, treeKey)
 		},
 	)
 }
@@ -277,6 +277,7 @@ func recordFetchOutcome(ctx context.Context, cacheHit bool) {
 // where a .git entry is residue rather than content.
 func (c *CAS) linkStoredTree(
 	ctx context.Context,
+	l log.Logger,
 	v *venv.Venv,
 	opts *CloneOptions,
 	scheme, key string,
@@ -309,11 +310,11 @@ func (c *CAS) linkStoredTree(
 
 	linkOpts = c.linkTreeOptions(linkOpts)
 
-	if err := LinkTree(ctx, v, c.blobStore, c.treeStore, tree, opts.Dir, linkOpts...); err != nil {
+	if err := LinkTree(ctx, l, v, c.blobStore, c.treeStore, tree, opts.Dir, linkOpts...); err != nil {
 		return err
 	}
 
-	return c.linkIncludedGitFiles(ctx, v, opts, key, linkOpts)
+	return c.linkIncludedGitFiles(ctx, l, v, opts, key, linkOpts)
 }
 
 // gitDirEntryPrefix is the tab that opens a tree line's path field
@@ -359,6 +360,7 @@ func dropGitDirEntries(data []byte) []byte {
 // hide that.
 func (c *CAS) linkIncludedGitFiles(
 	ctx context.Context,
+	l log.Logger,
 	v *venv.Venv,
 	opts *CloneOptions,
 	key string,
@@ -397,7 +399,7 @@ func (c *CAS) linkIncludedGitFiles(
 		return fmt.Errorf("parse git file records for %s: %w", key, err)
 	}
 
-	return LinkTree(ctx, v, c.blobStore, c.treeStore, tree, gitDir, linkOpts...)
+	return LinkTree(ctx, l, v, c.blobStore, c.treeStore, tree, gitDir, linkOpts...)
 }
 
 // storeFetchedContent stores every blob referenced by the tree, then
@@ -453,7 +455,7 @@ func (c *CAS) storeFetchedContent(
 				return fmt.Errorf("read symlink %s: %w", path, err)
 			}
 
-			if err := blobContent.Ensure(l, v, blobHash, []byte(target)); err != nil {
+			if err := blobContent.Ensure(l, v, blobHash, []byte(target), StoredFilePerms); err != nil {
 				return fmt.Errorf("store symlink blob %s: %w", path, err)
 			}
 		default:
@@ -469,7 +471,7 @@ func (c *CAS) storeFetchedContent(
 	}
 
 	treeContent := NewContent(c.treeStore)
-	if err := treeContent.EnsureWithWait(l, v, treeKey, treeData); err != nil {
+	if err := treeContent.EnsureWithWait(l, v, treeKey, treeData, StoredFilePerms); err != nil {
 		return fmt.Errorf("store tree %s: %w", treeKey, err)
 	}
 

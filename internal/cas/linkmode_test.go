@@ -69,6 +69,7 @@ func TestLinkModes(t *testing.T) {
 			targetPath := "/target/main.tf"
 
 			outcome, err := content.Link(
+				l,
 				v,
 				linkModeTestHash,
 				targetPath,
@@ -107,7 +108,7 @@ func TestLinkTreeCloneModeFallsBackWithoutCloneSupport(t *testing.T) {
 	blobData := []byte("module content\n")
 	store := cas.NewStore("/store")
 
-	require.NoError(t, cas.NewContent(store).Store(l, v, linkModeTestHash, blobData))
+	require.NoError(t, cas.NewContent(store).Store(l, v, linkModeTestHash, blobData, cas.StoredFilePerms))
 
 	tree, err := git.ParseTree([]byte("100644 blob "+linkModeTestHash+" main.tf"), "/target")
 	require.NoError(t, err)
@@ -118,6 +119,7 @@ func TestLinkTreeCloneModeFallsBackWithoutCloneSupport(t *testing.T) {
 
 	require.NoError(t, cas.LinkTree(
 		ctx,
+		l,
 		v,
 		store,
 		store,
@@ -166,7 +168,7 @@ func TestLinkCloneModeOnOSFilesystem(t *testing.T) {
 	content := cas.NewContent(cas.NewStore(storeDir))
 	blobData := []byte("module content\n")
 
-	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData))
+	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData, cas.StoredFilePerms))
 
 	sourcePath := filepath.Join(storeDir, linkModeTestHash[:2], linkModeTestHash)
 	skipWithoutCloneSupport(t, v, sourcePath, filepath.Join(targetDir, "probe"))
@@ -179,7 +181,7 @@ func TestLinkCloneModeOnOSFilesystem(t *testing.T) {
 			opts = append(opts, cas.WithLinkForceCopy())
 		}
 
-		outcome, err := content.Link(v, linkModeTestHash, targetPath, 0o644, opts...)
+		outcome, err := content.Link(l, v, linkModeTestHash, targetPath, 0o644, opts...)
 		require.NoError(t, err)
 		assert.Equal(
 			t,
@@ -223,7 +225,7 @@ func TestLinkMutableSourceClonesWhereSupported(t *testing.T) {
 	content := cas.NewContent(cas.NewStore(storeDir))
 	blobData := []byte("module content\n")
 
-	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData))
+	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData, cas.StoredFilePerms))
 
 	sourcePath := filepath.Join(storeDir, linkModeTestHash[:2], linkModeTestHash)
 	skipWithoutCloneSupport(t, v, sourcePath, filepath.Join(targetDir, "probe"))
@@ -231,6 +233,7 @@ func TestLinkMutableSourceClonesWhereSupported(t *testing.T) {
 	targetPath := filepath.Join(targetDir, "main.tf")
 
 	outcome, err := content.Link(
+		l,
 		v,
 		linkModeTestHash,
 		targetPath,
@@ -274,11 +277,12 @@ func TestLinkMutableSourceCopiesWithoutCloneSupport(t *testing.T) {
 	v = v.WithFS(&noCloneFS{FS: v.FS})
 
 	content := cas.NewContent(cas.NewStore("/store"))
-	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData))
+	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData, cas.StoredFilePerms))
 
 	targetPath := "/target/main.tf"
 
 	outcome, err := content.Link(
+		l,
 		v,
 		linkModeTestHash,
 		targetPath,
@@ -319,7 +323,7 @@ func TestLinkTreeProbesCloneSupportOnce(t *testing.T) {
 
 	for i := range files {
 		hash := fmt.Sprintf("%040x", i+1)
-		require.NoError(t, content.Store(l, v, hash, blobData))
+		require.NoError(t, content.Store(l, v, hash, blobData, cas.StoredFilePerms))
 
 		treeData = fmt.Appendf(treeData, "100644 blob %s\tfile%02d.tf\n", hash, i)
 	}
@@ -332,6 +336,7 @@ func TestLinkTreeProbesCloneSupportOnce(t *testing.T) {
 
 	require.NoError(t, cas.LinkTree(
 		t.Context(),
+		l,
 		v.WithFS(fsys),
 		store,
 		store,
@@ -384,7 +389,7 @@ func newLinkModeStore(t *testing.T, l log.Logger, blobData []byte) (*venv.Venv, 
 	require.NoError(t, v.FS.MkdirAll("/target", 0o755))
 
 	content := cas.NewContent(cas.NewStore("/store"))
-	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData))
+	require.NoError(t, content.Store(l, v, linkModeTestHash, blobData, cas.StoredFilePerms))
 
 	return v, content
 }

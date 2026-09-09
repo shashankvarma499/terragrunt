@@ -176,7 +176,7 @@ func TestContentLinkConcurrentSameTargetWithRacing(t *testing.T) {
 			content := cas.NewContent(cas.NewStore(storeDir))
 
 			const hash = "3333333333333333333333333333333333333333"
-			require.NoError(t, content.Store(l, v, hash, blobData))
+			require.NoError(t, content.Store(l, v, hash, blobData, cas.StoredFilePerms))
 			require.NoError(t, os.Chmod(filepath.Join(storeDir, hash[:2], hash), tt.storedPerm))
 
 			gitDir := filepath.Join(t.TempDir(), ".git")
@@ -196,6 +196,7 @@ func TestContentLinkConcurrentSameTargetWithRacing(t *testing.T) {
 					defer wg.Done()
 
 					_, errs[idx] = content.Link(
+						l,
 						v,
 						hash,
 						targetPath,

@@ -17,6 +17,8 @@ import (
 
 	"errors"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/gruntwork-io/terragrunt/internal/git"
 	"github.com/gruntwork-io/terragrunt/internal/util"
 	"github.com/gruntwork-io/terragrunt/internal/venv"
@@ -317,6 +319,86 @@ func (c *CAS) Clone(
 		Fetch:    c.gitFetcher(url, &opts),
 		Attrs:    map[string]any{"branch": opts.Branch},
 	})
+}
+
+// EnsureBlob stores the blob named by hash unless the store already has
+// it, streaming its content straight from batch into the store's temp
+// file instead of going through [Content.Store]. The stored blob takes the
+// git tree mode with the write bits cleared, so the default-link path can
+// hardlink it without changing whether it is executable.
+func (c *CAS) EnsureBlob(
+	v *venv.Venv,
+	batch *git.CatFileBatch,
+	hash string,
+	gitPerm os.FileMode,
+) (err error) {
+	v.RequireGOOS()
+
+	needsWrite, unlock := c.blobStore.EnsureWithWait(v, hash)
+	defer unlock()
+
+	if !needsWrite {
+		return nil
+	}
+
+	content := NewContent(c.blobStore)
+
+	tmpHandle, err := content.GetTmpHandle(v, hash)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := tmpHandle.Name()
+
+	defer func() {
+		if _, statErr := v.FS.Stat(tmpPath); statErr == nil {
+			err = errors.Join(err, v.FS.Remove(tmpPath))
+		}
+	}()
+
+	if err = streamBlob(v, batch, hash, tmpHandle); err != nil {
+		return err
+	}
+
+	// Symlink entries (git mode 120000) have no permission bits, but the blob
+	// stores the link target string and must stay readable so linkTree can
+	// resolve the symlink at materialization time.
+	storedPerm := gitPerm.Perm() &^ WriteBitMask
+	if storedPerm == 0 {
+		storedPerm = StoredFilePerms
+	}
+
+	// The mode is set before the rename so a reader never sees the object at
+	// the temp file's mode between the two steps.
+	if err = v.FS.Chmod(tmpPath, storedPerm); err != nil {
+		return err
+	}
+
+	return content.publish(v, tmpPath, hash)
+}
+
+// streamBlob reads the blob named by hash from batch into tmpHandle and
+// closes the handle whatever the outcome. The caller removes or renames
+// the file next, and Windows refuses both while a handle is open.
+func streamBlob(
+	v *venv.Venv,
+	batch *git.CatFileBatch,
+	hash string,
+	tmpHandle vfs.File,
+) (err error) {
+	defer func() {
+		err = errors.Join(err, tmpHandle.Close())
+	}()
+
+	if err := batch.ReadBlob(hash, tmpHandle); err != nil {
+		return err
+	}
+
+	if v.Platform.GOOS == WindowsOS {
+		return tmpHandle.Sync()
+	}
+
+	return nil
 }
 
 // gitFetcher returns a SourceFetcher that ingests through the git-native
@@ -718,7 +800,7 @@ func (c *CAS) storeIncludedGitFiles(
 
 		record := fmt.Appendf(nil, "%06o blob %s\t%s\n", info.Mode().Perm(), blobHash, name)
 
-		if err := recordContent.EnsureWithWait(l, v, key, record); err != nil {
+		if err := recordContent.EnsureWithWait(l, v, key, record, StoredFilePerms); err != nil {
 			return err
 		}
 	}
@@ -762,7 +844,7 @@ func (c *CAS) storeTreeRecursive(
 	}
 
 	treeContent := NewContent(c.treeStore)
-	if err := treeContent.EnsureWithWait(l, v, hash, tree.Data()); err != nil {
+	if err := treeContent.EnsureWithWait(l, v, hash, tree.Data(), StoredFilePerms); err != nil {
 		return err
 	}
 
@@ -771,14 +853,74 @@ func (c *CAS) storeTreeRecursive(
 
 // storeBlobs stores blobs in the CAS. Gitlink entries (type "commit")
 // name objects that live in another repository entirely, so only blob
-// entries are written; submodule contents arrive via
-// [CAS.storeSubmodules].
+// entries are written. Submodule contents arrive via
+// [CAS.storeSubmodules]. Every blob the store lacks is read through a
+// `git cat-file --batch` process, started only when there is something to
+// read.
+//
+// The pending blobs are split across [vfs.FSWorkers] shards, which
+// overlaps the store's own writes. Shards never outnumber the blobs they
+// serve, so a small tree still starts a single git process.
 func (c *CAS) storeBlobs(
 	ctx context.Context,
 	v *venv.Venv,
 	runner *git.GitRunner,
 	entries []git.TreeEntry,
 ) error {
+	pending := c.blobsNeedingWrite(v, entries)
+	if len(pending) == 0 {
+		return nil
+	}
+
+	shards := min(vfs.FSWorkers, len(pending))
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(shards)
+
+	for shard := range shards {
+		g.Go(func() error {
+			return c.storeBlobShard(ctx, v, runner, pending, shard, shards)
+		})
+	}
+
+	return g.Wait()
+}
+
+// storeBlobShard stores the pending blobs at every index congruent to
+// shard modulo shards. A batch answers requests in order on one pair of
+// pipes, so it serves a single goroutine. Each shard therefore starts and
+// closes its own.
+func (c *CAS) storeBlobShard(
+	ctx context.Context,
+	v *venv.Venv,
+	runner *git.GitRunner,
+	pending []git.TreeEntry,
+	shard int,
+	shards int,
+) (err error) {
+	batch, err := runner.StartCatFileBatch(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		err = errors.Join(err, batch.Close())
+	}()
+
+	for i := shard; i < len(pending); i += shards {
+		entry := pending[i]
+		if err := c.EnsureBlob(v, batch, entry.Hash, gitFilePerm(entry.Mode)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// blobsNeedingWrite filters entries down to the blobs the store lacks.
+func (c *CAS) blobsNeedingWrite(v *venv.Venv, entries []git.TreeEntry) []git.TreeEntry {
+	var pending []git.TreeEntry
+
 	for _, entry := range entries {
 		if entry.Type != git.EntryTypeBlob {
 			continue
@@ -788,12 +930,10 @@ func (c *CAS) storeBlobs(
 			continue
 		}
 
-		if err := c.ensureBlob(ctx, v, runner, entry.Hash, gitFilePerm(entry.Mode)); err != nil {
-			return err
-		}
+		pending = append(pending, entry)
 	}
 
-	return nil
+	return pending
 }
 
 // storeSubmodules ingests the repositories behind gitlink entries so the
@@ -868,81 +1008,6 @@ func submoduleURLs(
 	}
 
 	return nil, nil
-}
-
-// ensureBlob ensures that a blob exists in the CAS.
-// It doesn't use the standard content.Store method because
-// we want to take advantage of the ability to write to the
-// entry using `git cat-file`. gitPerm is the git tree mode for
-// this blob; the stored blob is chmodded to gitPerm with the
-// write bits cleared so the default-link path can hardlink the
-// blob directly without altering its executable-ness.
-//
-// err is a named return so the deferred tempfile cleanup can
-// errors.Join its failure into what the caller actually sees;
-// otherwise the assignment targets a local variable that has no
-// connection to the function's return slot.
-func (c *CAS) ensureBlob(
-	ctx context.Context,
-	v *venv.Venv,
-	runner *git.GitRunner,
-	hash string,
-	gitPerm os.FileMode,
-) (err error) {
-	v.RequireGOOS()
-
-	needsWrite, unlock := c.blobStore.EnsureWithWait(v, hash)
-	defer unlock()
-
-	if !needsWrite {
-		return nil
-	}
-
-	content := NewContent(c.blobStore)
-
-	tmpHandle, err := content.GetTmpHandle(v, hash)
-	if err != nil {
-		return err
-	}
-
-	tmpPath := tmpHandle.Name()
-
-	defer func() {
-		if _, statErr := v.FS.Stat(tmpPath); statErr == nil {
-			err = errors.Join(err, v.FS.Remove(tmpPath))
-		}
-	}()
-
-	err = runner.CatFile(ctx, hash, tmpHandle)
-	if err != nil {
-		return err
-	}
-
-	if v.Platform.GOOS == WindowsOS {
-		if err = tmpHandle.Sync(); err != nil {
-			return err
-		}
-	}
-
-	if err = tmpHandle.Close(); err != nil {
-		return err
-	}
-
-	// Symlink entries (git mode 120000) have no permission bits, but the blob
-	// stores the link target string and must stay readable so linkTree can
-	// resolve the symlink at materialization time.
-	storedPerm := gitPerm.Perm() &^ WriteBitMask
-	if storedPerm == 0 {
-		storedPerm = StoredFilePerms
-	}
-
-	// The mode is set before the rename so a reader never sees the object
-	// at the temp file's mode between the two steps.
-	if err = v.FS.Chmod(tmpPath, storedPerm); err != nil {
-		return err
-	}
-
-	return content.publish(v, tmpPath, hash)
 }
 
 func hashFile(fsys vfs.FS, path string) (string, error) {

@@ -185,7 +185,7 @@ func foldGitFilesIntoTree(
 		require.NoError(t, os.Remove(filepath.Join(c.GitFileStore().Path(), key[:2], key)))
 	}
 
-	require.NoError(t, trees.Store(l, v, hash, treeData))
+	require.NoError(t, trees.Store(l, v, hash, treeData, cas.StoredFilePerms))
 }
 
 // TestCAS_IncludedGitFilesConcurrentCallersWithRacing runs callers with
